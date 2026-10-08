@@ -22,17 +22,23 @@ struct FrostedSurface: NSViewRepresentable {
 }
 
 struct PanelSurface: View {
+    var theme: String
+    var opacity: Double
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
         ZStack {
-            if reduceTransparency {
+            if theme == "Black" {
+                Color.black
+            } else if reduceTransparency {
                 Color(nsColor: .windowBackgroundColor)
             } else {
                 FrostedSurface()
-                (scheme == .dark ? Color(red: 0.08, green: 0.09, blue: 0.12) : .white).opacity(scheme == .dark ? 0.66 : 0.72)
+                (scheme == .dark ? Color(red: 0.08, green: 0.09, blue: 0.12) : .white).opacity(opacity)
             }
-            LinearGradient(colors: [.white.opacity(scheme == .dark ? 0.045 : 0.28), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+            if theme != "Black" {
+                LinearGradient(colors: [.white.opacity(scheme == .dark ? 0.045 : 0.28), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+            }
         }
     }
 }
@@ -69,6 +75,52 @@ struct CardAction: View {
     }
 }
 
+final class SearchTextField: NSTextField {
+    var focusPanel: (() -> Void)?
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        // Hover panels cannot become key until explicitly activated.
+        focusPanel?()
+        super.mouseDown(with: event)
+    }
+}
+
+struct SearchInput: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var focused: Bool
+    let focus: () -> Void
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: SearchInput
+        init(_ parent: SearchInput) { self.parent = parent }
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+        func controlTextDidBeginEditing(_ notification: Notification) { parent.focused = true }
+        func controlTextDidEndEditing(_ notification: Notification) { parent.focused = false }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> SearchTextField {
+        let field = SearchTextField(string: text)
+        field.placeholderString = "Search text, notes, or apps"
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 13)
+        field.setAccessibilityLabel("Search clipboard history")
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        field.focusPanel = focus
+        return field
+    }
+    func updateNSView(_ field: SearchTextField, context: Context) {
+        context.coordinator.parent = self
+        field.focusPanel = focus
+        if field.stringValue != text { field.stringValue = text }
+    }
+}
+
 struct SearchBar: View {
     @ObservedObject var model: Model
     let focus: () -> Void
@@ -79,10 +131,7 @@ struct SearchBar: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(interaction.focused ? Color.blue : Color.secondary)
-            TextField("Search text, notes, or apps", text: $model.query, onEditingChanged: { editing in interaction.focused = editing })
-                .textFieldStyle(.plain).font(.system(size: 13))
-                .accessibilityLabel("Search clipboard history")
-                .onTapGesture { focus() }
+            SearchInput(text: $model.query, focused: $interaction.focused, focus: focus)
             if !model.query.isEmpty {
                 Button { model.query = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 13)).foregroundStyle(.secondary)
@@ -100,21 +149,29 @@ struct SearchBar: View {
 
 struct ClipboardCard: View {
     let entry: Entry
+    private let formattedJSON: String?
     @ObservedObject var model: Model
     @StateObject private var interaction = InteractionState()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var scheme
+    private var compact: Bool { model.preferences.compactCards }
+    private var black: Bool { model.preferences.theme == "Black" }
     private var copied: Bool { model.copiedID == entry.id }
     private var selected: Bool { model.selected == entry.id }
     private var showActions: Bool { interaction.hovered || selected }
     private var code: Bool { ["Code / Text", "JSON", "SQL", "Command"].contains(entry.label) }
     private var tint: Color { copied ? .green : .blue }
+    init(entry: Entry, model: Model) {
+        self.entry = entry
+        self.model = model
+        formattedJSON = entry.text.flatMap(JSONFormatter.format)
+    }
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Button { model.copyAction?(entry, nil) } label: {
+            Button { model.pasteAction?(entry) } label: {
                 HStack(alignment: .top, spacing: 14) {
                     if entry.text == nil, let rep = entry.images.first { Thumbnail(url: model.store.imageURL(rep.file)) }
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: compact ? 4 : 8) {
                         HStack(spacing: 6) {
                             Text(entry.label.uppercased()).font(.system(size: 9, weight: .semibold)).tracking(0.8)
                                 .foregroundStyle(.secondary)
@@ -129,29 +186,46 @@ struct ClipboardCard: View {
                         }
                         if let text = entry.text {
                             Text(String(text.prefix(600)))
-                                .font(.system(size: 13, weight: .regular, design: code ? .monospaced : .default))
+                                .font(.system(size: model.preferences.textSize, weight: .regular, design: code ? .monospaced : .default))
                                 .foregroundStyle(entry.label == "URL" ? Color.blue : Color.primary)
-                                .lineSpacing(3).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+                                .lineSpacing(compact ? 1 : 3).lineLimit(compact ? 2 : 3).frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            Text(entry.note.isEmpty ? "Image" : entry.note).font(.system(size: 13, weight: .medium)).lineLimit(2)
+                            Text(entry.note.isEmpty ? "Image" : entry.note).font(.system(size: model.preferences.textSize, weight: .medium)).lineLimit(compact ? 1 : 2)
                             Text("\(entry.width) × \(entry.height) px").font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         ItemContext(entry: entry)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(QuietButtonStyle()).accessibilityLabel("Copy \(entry.label)")
-            VStack(spacing: 1) {
-                CardAction(symbol: "doc.on.doc", title: "Copy") { model.copyAction?(entry, nil) }
-                CardAction(symbol: entry.pinned ? "pin.slash" : "pin", title: entry.pinned ? "Unpin" : "Pin") { model.mutate { $0.pin(entry.id) } }
-                CardAction(symbol: "trash", title: "Delete", destructive: true) { model.mutate { $0.delete(entry.id) } }
+            }.buttonStyle(QuietButtonStyle()).accessibilityLabel("\(entry.text == nil ? "Copy" : "Paste") \(entry.label)")
+                .help(entry.text == nil ? "Copy image" : "Paste into the previously active app")
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    CardAction(symbol: "doc.on.doc", title: "Copy") { model.copyAction?(entry, nil) }
+                    CardAction(symbol: entry.pinned ? "pin.slash" : "pin", title: entry.pinned ? "Unpin" : "Pin") { model.mutate { $0.pin(entry.id) } }
+                }
+                HStack(spacing: 0) {
+                    DragHandle(entry: entry, model: model).frame(width: 28, height: 24)
+                    Menu {
+                        if let formatted = formattedJSON {
+                            Button("Copy formatted JSON") { model.copyAction?(entry, formatted) }
+                        }
+                        Button("Delete", role: .destructive) { model.mutate { $0.delete(entry.id) } }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 13)).frame(width: 28, height: 24)
+                    }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .help("More actions").accessibilityLabel("More actions")
+                }
             }.opacity(showActions ? 1 : 0)
                 .allowsHitTesting(showActions).accessibilityHidden(!showActions)
-        }.padding(14)
-            .background(RoundedRectangle(cornerRadius: 14).fill(copied || selected ? tint.opacity(scheme == .dark ? 0.12 : 0.07) : Color.primary.opacity(interaction.hovered ? 0.065 : 0.035)))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(copied || selected ? tint.opacity(0.35) : Color.primary.opacity(interaction.hovered ? 0.12 : 0.055), lineWidth: 1))
+        }.padding(compact ? 10 : 14)
+            .background(RoundedRectangle(cornerRadius: 14).fill(copied || selected ? tint.opacity(scheme == .dark ? 0.12 : 0.07) : (black ? Color(white: interaction.hovered ? 0.10 : 0.065) : Color.primary.opacity(interaction.hovered ? 0.065 : 0.035))))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(copied || selected ? tint.opacity(0.35) : Color.primary.opacity(black ? (interaction.hovered ? 0.25 : 0.17) : (interaction.hovered ? 0.12 : 0.055)), lineWidth: 1))
             .shadow(color: .black.opacity(interaction.hovered ? 0.06 : 0), radius: 5, y: 2)
             .scaleEffect(interaction.hovered && !reduceMotion ? 1.004 : 1)
-            .onHover { interaction.hovered = $0 }
+            .onHover { hovering in
+                interaction.hovered = hovering
+                if hovering && !model.dragging { model.selected = entry.id }
+            }
             .animation(.easeOut(duration: reduceMotion ? 0 : 0.16), value: interaction.hovered)
             .animation(.easeOut(duration: reduceMotion ? 0 : 0.18), value: copied)
             .animation(.easeOut(duration: reduceMotion ? 0 : 0.15), value: selected)

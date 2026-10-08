@@ -33,18 +33,18 @@ struct ItemContext: View {
 
 struct HistoryEmptyState: View {
     @ObservedObject var model: Model
-    var searching: Bool { !model.query.isEmpty }
+    var searching: Bool { !model.query.isEmpty || model.filter != .all }
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: searching ? "magnifyingglass" : (model.paused ? "pause.circle" : "doc.on.clipboard"))
                 .font(.system(size: 36, weight: .light)).foregroundStyle(.secondary)
             Text(searching ? "No matches found" : (model.paused ? "Recording is paused" : "Your next copy starts here"))
                 .font(.headline)
-            Text(searching ? "Try another keyword, item type, or app name." : (model.paused ? "Resume recording to save text and images you copy." : "Copy text, a link, or an image in any app.\nIt will appear here, ready to use again."))
+            Text(searching ? "Try another keyword or choose a different filter." : (model.paused ? "Resume recording to save text and images you copy." : "Copy text, a link, or an image in any app.\nIt will appear here, ready to use again."))
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            if searching { Button("Clear search") { model.query = "" } }
+            if searching { Button("Show all history") { model.query = ""; model.filter = .all } }
             else if model.paused { Button("Resume recording") { model.togglePause() } }
             else { Text("Open anytime with " + model.preferences.shortcutLabel).font(.caption).foregroundStyle(.secondary) }
-        }.padding(24).frame(maxWidth: .infinity, minHeight: 260)
+        }.padding(24).frame(maxWidth: .infinity, minHeight: 180)
     }
 }

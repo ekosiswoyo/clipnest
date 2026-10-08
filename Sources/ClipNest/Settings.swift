@@ -5,6 +5,21 @@ import Carbon
 
 struct Preferences: Codable, Equatable {
     var theme = "Dark"
+    private var savedCompactCards: Bool?
+    private var savedTextSize: Double?
+    private var savedOpacity: Double?
+    var compactCards: Bool {
+        get { savedCompactCards ?? true }
+        set { savedCompactCards = newValue }
+    }
+    var textSize: Double {
+        get { min(16, max(11, savedTextSize ?? 13)) }
+        set { savedTextSize = newValue }
+    }
+    var panelOpacity: Double {
+        get { min(1, max(0.3, savedOpacity ?? 0.66)) }
+        set { savedOpacity = newValue }
+    }
     var hoverEnabled = true
     var hoverDelay = 0.0
     var closeDelay = 0.5
@@ -24,7 +39,7 @@ struct Preferences: Codable, Equatable {
     }
     var shortcutLabel: String { "\(shortcutModifiers) + \(shortcutKey)" }
     var colorScheme: ColorScheme? { theme == "System" ? nil : (theme == "Light" ? .light : .dark) }
-    var background: Color { theme == "Dark" ? .black : Color(nsColor: .windowBackgroundColor) }
+    var background: Color { ["Dark", "Black"].contains(theme) ? .black : Color(nsColor: .windowBackgroundColor) }
 }
 
 final class LoginState: ObservableObject {
@@ -55,8 +70,25 @@ struct SettingsView: View {
                         Button("Open Login Items settings") { SMAppService.openSystemSettingsLoginItems() }
                     }
                     Picker("Appearance", selection: $model.preferences.theme) {
-                        ForEach(["System", "Dark", "Light"], id: \.self) { Text($0) }
+                        ForEach(["System", "Dark", "Light", "Black"], id: \.self) { Text($0) }
                     }
+                }
+                Section("Display") {
+                    Toggle("Compact cards", isOn: $model.preferences.compactCards)
+                    HStack {
+                        Text("Text size")
+                        Slider(value: $model.preferences.textSize, in: 11...16, step: 1)
+                        Text("\(Int(model.preferences.textSize)) pt").monospacedDigit().frame(width: 44)
+                    }
+                    HStack {
+                        Text("Background opacity")
+                        Slider(value: $model.preferences.panelOpacity, in: 0.3...1, step: 0.05)
+                            .disabled(model.preferences.theme == "Black")
+                        Text(model.preferences.theme == "Black" ? "100%" : "\(Int((model.preferences.panelOpacity * 100).rounded()))%")
+                            .monospacedDigit().frame(width: 44)
+                    }
+                    Text("Black always uses a solid background. Reduce Transparency also uses a solid background.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Open history") {
                     HStack {
@@ -96,7 +128,7 @@ struct SettingsView: View {
                     Text("Per item: text up to 1 MiB · images up to 20 MiB / 40 MP").font(.caption).foregroundStyle(.secondary)
                 }
             }.formStyle(.grouped)
-            Text("Stored locally · No auto-paste, network access, telemetry, or OCR.").font(.caption).foregroundStyle(.secondary)
+            Text("Stored locally · Paste to your active app on click.").font(.caption).foregroundStyle(.secondary)
             Text(model.store.root.path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
         }.padding(20).frame(width: 560, height: 640)
             .background(model.preferences.background)

@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Carbon
 import ImageIO
+import ApplicationServices
 import ClipNestCore
 
 final class KeyPanel: NSPanel {
@@ -9,6 +10,21 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { wantsFocus }
     var escape: (() -> Void)?
     override func cancelOperation(_ sender: Any?) { escape?() }
+}
+final class HistoryHostingView: NSHostingView<HistoryView> {
+    // Buttons must receive the first click while the hover panel is inactive.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+enum HistoryFilter: String, CaseIterable {
+    case all = "All", text = "Text", images = "Images", pinned = "Pinned"
+    func includes(_ entry: Entry) -> Bool {
+        switch self {
+        case .all: return true
+        case .text: return entry.text != nil
+        case .images: return entry.text == nil
+        case .pinned: return entry.pinned
+        }
+    }
 }
 @MainActor final class Model: ObservableObject {
     @Published var entries: [Entry] = []
@@ -23,13 +39,17 @@ final class KeyPanel: NSPanel {
     var onPreferences: ((Preferences) -> Void)?
     var captureSource: (() -> SourceApp?)?
     @Published var copiedID: UUID?
-    var copyInFlight = false
-    @Published var status = "Ready" { didSet { onStatus?(status) } }
+    @Published var copyInFlight = false
+    @Published var status = "Ready" { didSet { onStatus?(displayStatus) } }
     var onStatus: ((String) -> Void)?
     @Published var panelExpanded = false
     @Published var paused = false
-    @Published var query = ""
+    @Published var query = "" { didSet { if query != oldValue { selected = nil } } }
+    @Published var filter: HistoryFilter = .all { didSet { selected = nil } }
+    @Published var pasteStatus: String? { didSet { onStatus?(displayStatus) } }
+    var displayStatus: String { pasteStatus ?? status }
     @Published var selected: UUID?
+    @Published var scrollSelection: UUID?
     @Published var shortcutStatus = ""
     nonisolated let store: HistoryStore
     let io = DispatchQueue(label: "ClipNest.storage", qos: .utility)
@@ -37,6 +57,11 @@ final class KeyPanel: NSPanel {
     var count = NSPasteboard.general.changeCount
     var busy = false
     var copyAction: ((Entry, String?) -> Void)?
+    var pasteAction: ((Entry) -> Void)?
+    @Published var pasteDestination = "previous app"
+    @Published var dragging = false
+    var dragEnded: ((Bool) -> Void)?
+    var activeEntry: Entry? { filtered.first(where: { $0.id == selected }) ?? filtered.first }
     init() {
         let root = ProcessInfo.processInfo.environment["CLIPNEST_DATA_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ClipNest")
         do { store = try HistoryStore(root: root); entries = store.entries; if store.needsRecovery { status = StoreError.metadataCorrupt.localizedDescription } }
@@ -46,7 +71,12 @@ final class KeyPanel: NSPanel {
         entries = store.entries
         do { try store.flush() } catch { status = "Could not save history: \(error.localizedDescription)" }
     }
-    var filtered: [Entry] { entries.filter { query.isEmpty || ($0.text ?? "").localizedCaseInsensitiveContains(query) || $0.label.localizedCaseInsensitiveContains(query) || $0.note.localizedCaseInsensitiveContains(query) || ($0.sourceApp?.name ?? "").localizedCaseInsensitiveContains(query) } }
+    var filtered: [Entry] {
+        let matches = entries.filter {
+            filter.includes($0) && (query.isEmpty || ($0.text ?? "").localizedCaseInsensitiveContains(query) || $0.label.localizedCaseInsensitiveContains(query) || $0.note.localizedCaseInsensitiveContains(query) || ($0.sourceApp?.name ?? "").localizedCaseInsensitiveContains(query))
+        }
+        return matches.filter(\.pinned) + matches.filter { !$0.pinned }
+    }
     func refresh() {
         io.async { let snapshot = self.store.entries; Task { @MainActor in self.entries = snapshot } }
         save?.cancel()
@@ -84,6 +114,7 @@ final class KeyPanel: NSPanel {
         let list = filtered; guard !list.isEmpty else { return }
         let index = list.firstIndex { $0.id == selected } ?? (step > 0 ? -1 : list.count)
         selected = list[min(max(index + step, 0), list.count - 1)].id
+        scrollSelection = selected
     }
 }
 final class Thumbnails {
@@ -146,37 +177,85 @@ struct HistoryView: View {
     var topInset: CGFloat = 24
     let focus: () -> Void
     let close: () -> Void
+    private func sectionLabel(_ title: String) -> some View {
+        HStack {
+            Text(title.uppercased()).font(.system(size: 9, weight: .semibold)).tracking(0.8).foregroundStyle(.secondary)
+            Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
+        }.padding(.vertical, 4)
+    }
     var body: some View {
-        VStack(spacing: 14) {
+        let visible = model.filtered
+        VStack(spacing: 10) {
             HStack { Image(systemName: "square.on.square"); Text("ClipNest").font(.system(size: 16, weight: .semibold)); Spacer(); Text(model.paused ? "Paused" : "\(model.entries.count) items").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.vertical, 4).background(Color.primary.opacity(0.04), in: Capsule()); CardAction(symbol: "xmark", title: "Close history", action: close) }
-            SearchBar(model: model, focus: focus)
+            SearchBar(model: model, focus: focus).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                ForEach(HistoryFilter.allCases, id: \.self) { filter in
+                    Button { model.filter = filter } label: {
+                        Text(filter.rawValue).font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .foregroundStyle(model.filter == filter ? Color.white : Color.secondary)
+                            .background(model.filter == filter ? Color.blue : Color.primary.opacity(0.06), in: Capsule())
+                    }.buttonStyle(QuietButtonStyle()).accessibilityAddTraits(model.filter == filter ? .isSelected : [])
+                }
+                Spacer(minLength: 0)
+            }
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(model.filtered) { entry in
+                    LazyVStack(spacing: model.preferences.compactCards ? 6 : 10) {
+                        ForEach(visible) { entry in
+                            if entry.id == visible.first?.id && entry.pinned {
+                                sectionLabel("Pinned")
+                            } else if !entry.pinned && entry.id == visible.first(where: { !$0.pinned })?.id && visible.contains(where: \.pinned) {
+                                sectionLabel("History")
+                            }
                             ClipboardCard(entry: entry, model: model).id(entry.id)
                                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)))
                             .contextMenu {
                                 Button("Copy") { model.copyAction?(entry, nil) }
                                 Button(entry.pinned ? "Unpin" : "Pin") { model.mutate { $0.pin(entry.id) } }
-                                if entry.label == "JSON", let text = entry.text {
-                                    Button("Copy formatted JSON") { if let object = try? JSONSerialization.jsonObject(with: Data(text.utf8), options: .fragmentsAllowed), let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .fragmentsAllowed]), let formatted = String(data: data, encoding: .utf8) { model.copyAction?(entry, formatted) } }
+                                if let formatted = entry.text.flatMap(JSONFormatter.format) {
+                                    Button("Copy formatted JSON") { model.copyAction?(entry, formatted) }
                                 }
                                 if entry.text == nil { Button("Edit note…") { focus(); let alert = NSAlert(); alert.messageText = "Image note"; let field = NSTextField(string: entry.note); field.frame = NSRect(x: 0, y: 0, width: 300, height: 26); alert.accessoryView = field; alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel"); if alert.runModal() == .alertFirstButtonReturn { model.mutate { $0.note(entry.id, field.stringValue) } } } }
                                 Button("Delete") { model.mutate { $0.delete(entry.id) } }
                             }
                         }
-                        if model.filtered.isEmpty { HistoryEmptyState(model: model).transition(.opacity) }
+                        if visible.isEmpty { HistoryEmptyState(model: model).transition(.opacity) }
                     }.padding(2)
-                        .animation(.easeOut(duration: reduceMotion ? 0 : 0.18), value: model.filtered.map(\.id))
-                }.onChange(of: model.selected) { id in if let id { proxy.scrollTo(id) } }
-            }
+                        .animation(.easeOut(duration: reduceMotion ? 0 : 0.18), value: visible.map(\.id))
+                }.onChange(of: model.scrollSelection) { id in if let id { proxy.scrollTo(id) } }
+            }.frame(minHeight: 0, maxHeight: .infinity)
+                .clipped()
             Divider().opacity(0.4)
-            HStack(spacing: 6) {
-                if model.copiedID != nil { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                Text(model.status)
-            }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-        }.padding(24).frame(width: width, height: 470).padding(.top, topInset).background(PanelSurface()).clipShape(NotchShape()).overlay(NotchShape().stroke(Color.primary.opacity(0.09), lineWidth: 1)).preferredColorScheme(model.preferences.colorScheme)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Button {
+                        if let entry = model.activeEntry { model.pasteAction?(entry) }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: model.activeEntry?.text == nil ? "doc.on.doc" : "clipboard")
+                            Text(model.activeEntry?.text == nil ? "Copy image  ↵" : "Paste to \(model.pasteDestination)  ↵")
+                                .lineLimit(1).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxWidth: .infinity, minHeight: 28)
+                    }.disabled(model.activeEntry == nil || model.copyInFlight || model.dragging)
+                        .help("Paste to \(model.pasteDestination)")
+                    Button {
+                        if let entry = model.activeEntry { model.copyAction?(entry, nil) }
+                    } label: { Image(systemName: "doc.on.doc").frame(width: 28, height: 28) }
+                        .help("Copy selected item · ⌘Return").accessibilityLabel("Copy selected item")
+                        .disabled(model.activeEntry == nil || model.copyInFlight || model.dragging)
+                    Button(action: close) { Image(systemName: "xmark").frame(width: 28, height: 28) }.help("Close · Esc").accessibilityLabel("Close history")
+                }.buttonStyle(QuietButtonStyle()).font(.system(size: 11, weight: .medium))
+                HStack(spacing: 6) {
+                    if model.copiedID != nil { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                    Image(systemName: model.displayStatus.lowercased().contains("failed") || model.displayStatus.contains("Accessibility") ? "exclamationmark.circle" : "info.circle")
+                    Text(model.displayStatus)
+                }.font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).help(model.displayStatus)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
+        }.padding(.horizontal, 32).padding(.vertical, 24).frame(width: width, height: 470).padding(.top, topInset).background(PanelSurface(theme: model.preferences.theme, opacity: model.preferences.panelOpacity)).clipShape(NotchShape()).overlay(NotchShape().stroke(Color.primary.opacity(0.09), lineWidth: 1)).preferredColorScheme(model.preferences.colorScheme)
         .scaleEffect(x: model.panelExpanded || reduceMotion ? 1 : 0.92, y: model.panelExpanded || reduceMotion ? 1 : 0.04, anchor: .top)
         .opacity(model.panelExpanded ? 1 : 0)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : (model.panelExpanded ? .spring(response: 0.40, dampingFraction: 0.86) : .easeInOut(duration: 0.22)), value: model.panelExpanded)
@@ -219,6 +298,12 @@ struct HistoryView: View {
         model.onStatus?(model.status)
         menu()
         model.copyAction = { [weak self] entry, text in self?.copy(entry, text) }
+        model.pasteAction = { [weak self] entry in self?.copy(entry, nil, paste: entry.text != nil) }
+        model.dragEnded = { [weak self] success in
+            guard let self else { return }
+            if success { self.model.status = "Dropped — original kept in history"; self.hide() }
+            else { self.model.status = "Drag cancelled"; self.outsideSince = nil }
+        }
         model.captureSource = { [weak self] in
             guard let self else { return nil }
             let front = NSWorkspace.shared.frontmostApplication
@@ -247,7 +332,7 @@ struct HistoryView: View {
             if let editor = self.panel.firstResponder as? NSTextView, editor.hasMarkedText() { return event }
             if event.keyCode == 125 { self.model.move(1); return nil }
             if event.keyCode == 126 { self.model.move(-1); return nil }
-            if event.keyCode == 36, let entry = self.model.filtered.first(where: { $0.id == self.model.selected }) ?? self.model.filtered.first { self.copy(entry, nil); return nil }
+            if event.keyCode == 36, let entry = self.model.filtered.first(where: { $0.id == self.model.selected }) ?? self.model.filtered.first { self.copy(entry, nil, paste: entry.text != nil && !event.modifierFlags.contains(.command)); return nil }
             return event
         }
         NotificationCenter.default.addObserver(self, selector: #selector(geometry), name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -273,7 +358,7 @@ struct HistoryView: View {
     @objc func sleep() { hide() }
     func hover(point suppliedPoint: NSPoint? = nil, now: Date = Date()) {
         if CommandLine.arguments.contains("--panel-check") { return }
-        if NSApp.modalWindow != nil || model.copyInFlight || model.copiedID != nil { return }
+        if NSApp.modalWindow != nil || model.copyInFlight || model.copiedID != nil || model.dragging { return }
         let point = suppliedPoint ?? NSEvent.mouseLocation
         let inside = trigger.contains(point) || (open && panel.frame.contains(point))
         if keyboardLatch { if inside { keyboardLatch = false } else { return } }
@@ -299,8 +384,9 @@ struct HistoryView: View {
         }
         model.panelExpanded = false
         let screen = NSScreen.screens.first
-        panel.contentView = NSHostingView(rootView: HistoryView(model: model, width: min(560, (screen?.frame.width ?? 584) - 24), topInset: max(screen?.safeAreaInsets.top ?? 0, 24), focus: { [weak self] in self?.takeFocus() }, close: { [weak self] in self?.hide() }))
+        panel.contentView = HistoryHostingView(rootView: HistoryView(model: model, width: min(560, (screen?.frame.width ?? 584) - 24), topInset: max(screen?.safeAreaInsets.top ?? 0, 24), focus: { [weak self] in self?.takeFocus() }, close: { [weak self] in self?.hide() }))
         if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier { previousApp = front }
+        model.pasteDestination = previousApp?.localizedName ?? "previous app"
         geometry(); keyboardLatch = focus; open = true; panel.alphaValue = 1; panel.orderFrontRegardless()
         if focus { takeFocus() }; model.selected = model.filtered.first?.id
         DispatchQueue.main.async { [weak self] in
@@ -308,7 +394,12 @@ struct HistoryView: View {
             self.model.panelExpanded = true
         }
     }
-    func takeFocus() { panel.wantsFocus = true; NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil) }
+    func takeFocus() {
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            previousApp = front; model.pasteDestination = front.localizedName ?? "previous app"
+        }
+        panel.wantsFocus = true; NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
+    }
     func hide() {
         feedbackID += 1; model.copiedID = nil
         guard open else { return }
@@ -325,8 +416,24 @@ struct HistoryView: View {
             self.panel.contentView = nil
         }
     }
-    func copy(_ entry: Entry, _ formatted: String?) {
-        guard !model.copyInFlight else { return }
+    func copy(_ entry: Entry, _ formatted: String?, paste: Bool = false) {
+        guard !model.copyInFlight, !model.dragging else { return }
+        let front = NSWorkspace.shared.frontmostApplication
+        let target = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? previousApp : front
+        if paste {
+            model.pasteStatus = "Preparing paste to \(target?.localizedName ?? "previous app")…"
+            guard let target, !target.isTerminated, target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+                model.pasteStatus = "Paste failed — focus a text field in another app, then reopen history"
+                return
+            }
+            guard AXIsProcessTrusted() else {
+                model.pasteStatus = "Enable Accessibility for ClipNest to paste, then click the card again"
+                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(options)
+                return
+            }
+        }
+        if !paste { model.pasteStatus = nil }
         model.copyInFlight = true
         feedbackID += 1
         let feedback = feedbackID
@@ -336,10 +443,56 @@ struct HistoryView: View {
                 let object = try ClipboardCodec.item(entry: entry, store: self.model.store, formatted: formatted)
                 Task { @MainActor in
                     let pb = NSPasteboard.general
-                    self.model.copyInFlight = false
+                    if !paste { self.model.copyInFlight = false }
                     pb.clearContents()
                     if pb.writeObjects([object]) {
                         self.model.count = pb.changeCount
+                        if paste, let target {
+                            guard self.feedbackID == feedback, self.transitionID == presentation, self.open else {
+                                self.model.copyInFlight = false
+                                self.model.pasteStatus = "Copied — paste cancelled because history closed"
+                                return
+                            }
+                            self.hide()
+                            self.panel.orderOut(nil)
+                            target.activate(options: [.activateIgnoringOtherApps])
+                            let clipboardCount = pb.changeCount
+                            let closedPresentation = self.transitionID
+                            Task { @MainActor in
+                                defer { self.model.copyInFlight = false }
+                                // Allow activation and physical shortcut modifiers to settle.
+                                for _ in 0..<15 {
+                                    try? await Task.sleep(nanoseconds: 50_000_000)
+                                    guard self.transitionID == closedPresentation, !self.open,
+                                          !target.isTerminated, pb.changeCount == clipboardCount else {
+                                        self.model.pasteStatus = "Copied — paste cancelled"
+                                        return
+                                    }
+                                    let modifiers = CGEventSource.flagsState(.combinedSessionState)
+                                    if target.isActive && modifiers.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty {
+                                        guard AXIsProcessTrusted(),
+                                              let source = CGEventSource(stateID: .privateState),
+                                              let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
+                                              let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false) else {
+                                            self.model.pasteStatus = "Paste failed — text copied; press Cmd+V"
+                                            return
+                                        }
+                                        down.flags = .maskCommand; up.flags = .maskCommand
+                                        down.postToPid(target.processIdentifier); up.postToPid(target.processIdentifier)
+                                        self.model.pasteStatus = "Paste shortcut sent to \(target.localizedName ?? "destination app")"
+                                        return
+                                    }
+                                    if let active = NSWorkspace.shared.frontmostApplication,
+                                       active.processIdentifier != target.processIdentifier,
+                                       active.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                                        self.model.pasteStatus = "Copied — paste cancelled because the active app changed"
+                                        return
+                                    }
+                                }
+                                self.model.pasteStatus = "Paste failed — text copied; press Cmd+V"
+                            }
+                            return
+                        }
                         self.model.status = "Copied — press Cmd+V in the destination app"
                         guard self.feedbackID == feedback, self.transitionID == presentation, self.open else { return }
                         self.model.copiedID = entry.id
@@ -347,14 +500,14 @@ struct HistoryView: View {
                             guard let self, self.feedbackID == feedback, self.transitionID == presentation else { return }
                             self.hide()
                         }
-                    } else { self.model.status = "Copy failed" }
+                    } else { self.model.copyInFlight = false; self.model.status = "Copy failed"; if paste { self.model.pasteStatus = "Paste failed — could not copy item" } }
                 }
-            } catch { Task { @MainActor in self.model.copyInFlight = false; self.model.status = "Image file missing: \(error.localizedDescription)" } }
+            } catch { Task { @MainActor in self.model.copyInFlight = false; self.model.status = "Image file missing: \(error.localizedDescription)"; if paste { self.model.pasteStatus = self.model.status } } }
         }
     }
     func menu() {
         let menu = NSMenu()
-        let status = NSMenuItem(title: String(model.status.prefix(140)), action: nil, keyEquivalent: ""); status.isEnabled = false; menu.addItem(status); menu.addItem(.separator())
+        let status = NSMenuItem(title: String(model.displayStatus.prefix(140)), action: nil, keyEquivalent: ""); status.isEnabled = false; menu.addItem(status); menu.addItem(.separator())
         for (title, selector) in [("Open history  " + model.preferences.shortcutLabel, #selector(openHistory)), (model.paused ? "Resume" : "Pause", #selector(pause)), ("Settings…", #selector(settings)), ("Clear unpinned history", #selector(clear)), ("Delete all…", #selector(clearAll)), ("Quit ClipNest", #selector(quit))] { let row = NSMenuItem(title: title, action: selector, keyEquivalent: ""); row.target = self
             let symbol: String
             switch selector {

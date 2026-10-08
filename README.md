@@ -2,7 +2,7 @@
 
 A native macOS clipboard manager for text, code, links, and images. Hover at the center of the top edge of your screen or use a global shortcut to open a compact notch-style panel.
 
-Built with Swift, SwiftUI, and AppKit. No external dependencies, backend, telemetry, OCR, or automatic pasting.
+Built with Swift, SwiftUI, and AppKit. No external dependencies, backend, telemetry, or OCR.
 
 ## Features
 
@@ -21,22 +21,29 @@ Built with Swift, SwiftUI, and AppKit. No external dependencies, backend, teleme
 
 Get the app from [GitHub Releases](https://github.com/ekosiswoyo/clipnest/releases).
 
-The v0.1.0 binary is for **Apple Silicon (arm64)** and targets **macOS 13 or later**. Extract the ZIP and move `ClipNest.app` to Applications. This development release is ad-hoc signed and is not notarized; macOS may require approving it in Privacy & Security before the first launch. Intel binaries are not included.
+The v0.2.0 binary is for **Apple Silicon (arm64)** and targets **macOS 13 or later**. Extract the ZIP and move `ClipNest.app` to Applications. This development release is ad-hoc signed and is not notarized; macOS may require approving it in Privacy & Security before the first launch. Intel binaries are not included.
 
 ## Usage
 
-Copy text or an image in another app, then hover at the center of the screen’s top edge. Click a card to copy it back, then press **Command + V** in your destination app.
+Copy text or an image in another app, then hover at the center of the screen’s top edge. Click a text card to paste it at the cursor in the previously active app. On the first attempt, macOS asks for Accessibility access; enable ClipNest in System Settings → Privacy & Security → Accessibility, then click the card again. Focus your destination text field before opening history. Image cards and explicit Copy actions copy to the clipboard for manual **Command + V**.
 
-The default global shortcut is **Control + Option + Space**. It opens the panel with keyboard focus; hover opening does not take focus. Use Up/Down to select, Return to copy, and Escape to close. Click the search field to search. Copy, Pin, and Delete appear on hover or selection, and right-click offers additional actions.
+The default global shortcut is **Control + Option + Space**. It opens the panel with keyboard focus; hover opening does not take focus. Use Up/Down to select, Return to paste text (copy images), Command + Return to copy, and Escape to close. Click the search field to search. Copy, Pin, and Delete appear on hover or selection, and right-click offers additional actions.
 
 The menu bar provides history, pause/resume, Settings, cleanup, and Quit. Warning states appear in its icon and tooltip.
+
+For valid JSON, hover over or select its card and click the **{}** button (**Copy formatted JSON**), or use the right-click menu. This copies indented JSON with sorted keys while keeping the original history text. Objects, arrays, and standalone JSON values are supported; invalid JSON has no formatting action.
+
+The footer has buttons to paste/copy the selected item and close history, with shortcut hints and the destination app name. Hover over a card or use Up/Down to select it. Drag the grip at the top of a card's action column into an app that accepts text or images. Dragging keeps the original history item and does not change the system clipboard. The panel stays open during dragging, closes after an accepted drop, and remains open when the drag is cancelled.
 
 ## Settings
 
 Settings save automatically:
 
 - **Launch at login:** managed by macOS, available when running the app bundle. If approval is required, Settings links to Login Items.
-- **Appearance:** System, Dark, or Light.
+- **Appearance:** System, Dark, Light, or Black. Black uses a solid pure black history background without transparency.
+- **Display:** compact cards, text size from 11–16 pt, and background opacity from 30–100%. Black stays fully opaque.
+
+History shows pinned items first, with All, Text, Images, and Pinned filters that work together with search. Cards show Copy and Pin on hover or selection; the more menu contains Delete and formatted JSON copying. The footer names the paste destination and keeps paste feedback visible even when new clipboard entries arrive.
 - **Hover:** enable or disable opening; set open and close delays.
 - **Shortcut:** choose a modifier combination and Space, C, V, H, J, or K. Registration conflicts are reported.
 - **History:** 50, 100, 250, or 500 unpinned items; 100, 200, 500, or 1024 MiB storage.
@@ -68,7 +75,7 @@ Create a release ZIP and checksum:
 ./scripts/package-release.sh
 ```
 
-The ZIP architecture follows the build machine. The published v0.1.0 build was produced on arm64.
+The ZIP architecture follows the build machine. The published v0.2.0 build was produced on arm64.
 
 ## Verification
 

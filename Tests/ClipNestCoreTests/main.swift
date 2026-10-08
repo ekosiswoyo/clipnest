@@ -3,6 +3,28 @@ import AppKit
 import ClipNestCore
 enum CheckError: Error { case clipboardUnavailable }
 final class HistoryTests {
+    func testJSONFormatting() throws {
+        let input = "{\"z\":[true,null,{\"emoji\":\"🪺\"}],\"a\":1}"
+        let formatted = JSONFormatter.format(input)!
+        XCTAssertTrue(formatted.contains("\n"))
+        XCTAssertTrue(formatted.range(of: "\"a\"")!.lowerBound < formatted.range(of: "\"z\"")!.lowerBound)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(formatted.utf8)) as! NSDictionary,
+                       try JSONSerialization.jsonObject(with: Data(input.utf8)) as! NSDictionary)
+        for value in ["[]", "\"café 🪺\"", "42", "true", "null"] {
+            XCTAssertTrue(JSONFormatter.format(value) != nil)
+        }
+        for value in ["", "plain text", "{\"a\":}", "[1", "{} trailing"] {
+            XCTAssertEqual(JSONFormatter.format(value), nil)
+        }
+        let s = try store(); try s.addText(input)
+        let pb = NSPasteboard(name: NSPasteboard.Name("ClipNestJSONTests-\(UUID())"))
+        defer { pb.releaseGlobally() }
+        pb.clearContents()
+        XCTAssertTrue(pb.writeObjects([try ClipboardCodec.item(entry: s.entries[0], store: s, formatted: formatted)]))
+        XCTAssertEqual(pb.string(forType: .string), formatted)
+        XCTAssertEqual(s.entries[0].text, input)
+        if case .ignored = try ClipboardCodec.capture(pb) {} else { failures += 1 }
+    }
     func store() throws -> HistoryStore { try HistoryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("ClipNestTests-\(UUID())")) }
     func image() -> Data { let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 32, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!; return rep.representation(using: .png, properties: [:])! }
     func testExactTextDedupAndPersistence() throws {
@@ -128,6 +150,8 @@ if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--seed-large
     s.note(s.entries[0].id, "Fixture transparan 24 MP"); try s.flush(); print("Large image fixture seeded"); exit(0)
 }
 let tests = HistoryTests()
+do { try tests.testJSONFormatting(); print("CHECK JSON formatting / clipboard / original preservation") }
+catch { failures += 1; print("FAIL JSON formatting: \(error)") }
 for (name, test) in [("source context / legacy metadata", tests.testSourceContextAndLegacyHistory), ("personal history limits", tests.testApplyingPersonalLimits), ("exact text / dedup / restart", tests.testExactTextDedupAndPersistence), ("eviction / pins / capacity", tests.testEvictionAndPin), ("image payload / lifecycle", tests.testImageLifecycleAndRepresentations), ("missing / corrupt metadata", tests.testMissingAndCorruptMetadata), ("size limits / image eviction", tests.testLimitsAndImageEvictionFiles), ("clipboard round trip / privacy", tests.testClipboard)] {
     do { try test(); print("CHECK \(name)") } catch { failures += 1; print("FAIL \(name): \(error)") }
 }

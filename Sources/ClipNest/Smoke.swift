@@ -53,6 +53,44 @@ extension AppDelegate {
         await settle()
         check(!open && !panel.isVisible, "panel closes invisibly after hover exit delay")
         show(focus: false); check(!panel.isKeyWindow, "hover open does not take keyboard focus")
+        check(panel.contentView?.acceptsFirstMouse(for: nil) == true, "history buttons accept first click in inactive hover panel")
+        if let entry = model.entries.first {
+            let wasPinned = entry.pinned
+            model.mutate { $0.pin(entry.id) }
+            await settle()
+            check(model.entries.first(where: { $0.id == entry.id })?.pinned == !wasPinned, "pin action updates visible history")
+            model.mutate { $0.pin(entry.id) }
+            await settle()
+            check(model.entries.first(where: { $0.id == entry.id })?.pinned == wasPinned, "unpin action updates visible history")
+        }
+        model.dragging = true
+        hover(point: away, now: start.addingTimeInterval(10))
+        hover(point: away, now: start.addingTimeInterval(12))
+        check(open, "dragging keeps panel open outside its bounds")
+        model.dragging = false
+        await settle()
+        func searchField(in view: NSView) -> SearchTextField? {
+            if let field = view as? SearchTextField { return field }
+            return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+        }
+        if let content = panel.contentView, let field = searchField(in: content) {
+            check(field.acceptsFirstMouse(for: nil), "search accepts first click in hover panel")
+            field.focusPanel?()
+            panel.makeFirstResponder(field)
+            if let editor = panel.firstResponder as? NSTextView {
+                editor.selectAll(nil)
+                editor.insertText("no-match-typed-fixture", replacementRange: editor.selectedRange())
+                await settle()
+                check(panel.isKeyWindow && model.query == "no-match-typed-fixture" && model.filtered.isEmpty, "search typing activates hover panel and filters history")
+                model.query = ""
+                await settle()
+                check(field.stringValue.isEmpty && !model.filtered.isEmpty, "clearing search restores field and history")
+            } else { check(false, "search receives text editor focus") }
+        } else { check(false, "search field exists in hover panel") }
+        model.query = "no-match-footer-fixture"
+        check(model.activeEntry == nil, "footer has no action for an empty search")
+        model.query = ""
+        check(model.activeEntry?.id == model.entries.first?.id, "footer resolves selected visible item")
         let frame = panel.frame; geometry(); check(frame == panel.frame, "stable panel geometry")
         hide(); show(focus: true); await settle(); check(panel.isKeyWindow, "shortcut open takes focus")
         if let entry = model.entries.first {
@@ -61,7 +99,41 @@ extension AppDelegate {
             try? await Task.sleep(nanoseconds: 550_000_000)
             check(!open && !panel.isVisible && model.copiedID == nil, "copy feedback closes and resets")
         }
+        let originalEntries = model.entries
+        if var image = originalEntries.first {
+            image.pinned = true
+            var textEntry = image
+            textEntry.id = UUID(); textEntry.text = "Filter fixture"; textEntry.label = "Text"; textEntry.pinned = false
+            model.entries = [textEntry, image]
+            check(model.filtered.map(\.id) == [image.id, textEntry.id], "pinned entries appear first without changing history order")
+            model.filter = .text
+            check(model.filtered.map(\.id) == [textEntry.id], "text filter excludes images")
+            model.filter = .images
+            check(model.filtered.map(\.id) == [image.id], "image filter excludes text")
+            model.filter = .pinned
+            check(model.filtered.map(\.id) == [image.id], "pinned filter excludes unpinned entries")
+            model.query = "absent-filter-query"
+            check(model.filtered.isEmpty && model.activeEntry == nil, "search combines with filters and clears hidden selection")
+            model.query = ""; model.filter = .all
+            model.entries = originalEntries
+        }
+        model.pasteStatus = "Paste failed — fixture"
+        model.status = "Saved locally"
+        check(model.displayStatus == "Paste failed — fixture", "paste feedback survives clipboard updates")
+        model.pasteStatus = nil
         let originalPreferences = model.preferences
+        if let data = try? JSONEncoder().encode(originalPreferences),
+           var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            object.removeValue(forKey: "savedCompactCards")
+            object.removeValue(forKey: "savedTextSize")
+            object.removeValue(forKey: "savedOpacity")
+            let legacy = try? JSONSerialization.data(withJSONObject: object)
+            let decoded = legacy.flatMap { try? JSONDecoder().decode(Preferences.self, from: $0) }
+            check(decoded?.theme == originalPreferences.theme && decoded?.compactCards == true && decoded?.textSize == 13, "older settings retain theme and receive display defaults")
+        }
+        model.preferences.compactCards = false
+        model.preferences.textSize = 16
+        model.preferences.panelOpacity = 0.8
         model.preferences.hoverEnabled = false
         hover(point: away); hover(point: hoverPoint)
         check(!open, "disabled hover keeps panel closed")
@@ -106,11 +178,39 @@ extension AppDelegate {
         model.preferences.theme = "Light"
         try? await Task.sleep(nanoseconds: 300_000_000)
         capturePanel("panel-light.png")
+        model.preferences.theme = "Black"
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        capturePanel("panel-black.png")
+        model.preferences.theme = "Light"
         let snapshot = model.entries
         model.entries = []
         try? await Task.sleep(nanoseconds: 300_000_000)
         capturePanel("empty-history.png")
         model.entries = snapshot
+        if var fixture = snapshot.first {
+            fixture.text = "{\"message\":\"Footer layout fixture\",\"items\":[1,2,3]}"
+            fixture.label = "JSON"
+            fixture.images = []
+            model.entries = (0..<12).map { index in var entry = fixture; entry.id = UUID(); entry.pinned = index == 2; return entry }
+            model.selected = model.entries.first?.id
+            model.pasteDestination = "An application with a very long destination name"
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            capturePanel("footer-populated.png")
+            model.preferences.theme = "Black"
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            capturePanel("black-populated.png")
+            model.preferences.compactCards = false
+            model.preferences.textSize = 16
+            model.pasteStatus = "Paste failed — focus a text field in another app, then reopen history"
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            capturePanel("large-text-status.png")
+            model.preferences.theme = "Light"
+            model.preferences.compactCards = true
+            model.preferences.textSize = 13
+            model.pasteStatus = nil
+            model.entries = snapshot
+            model.selected = snapshot.first?.id
+        }
         model.copiedID = snapshot.first?.id
         try? await Task.sleep(nanoseconds: 300_000_000)
         capturePanel("copy-feedback.png")
