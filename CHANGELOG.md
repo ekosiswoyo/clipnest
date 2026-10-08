@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Full preview for selectable text, JSON, and original images in a resizable window.
+- JSON formatting toggle, image zoom, and Fit controls in preview.
+- Preview from item menus, the footer eye button, or Space outside the search field.
+- Explicit Paste as Plain Text from item menus, footer paste options, preview, or Option + Return. Uses the original text without RTF or HTML formatting.
+- Preview remains open outside the hover trigger and returns keyboard focus to history when closed.
+
+Validation: release build, GUI regression checks for full Unicode text, preview focus/lifecycle, plain text payload, filters, and settings; visual inspection of text, JSON, and image previews. Apple Silicon, macOS 13 or later; ad-hoc signed and not notarized.
+
 ## 0.2.0
 
 - Compact cards, streamlined Copy/Pin actions, a more-actions menu, and a lighter footer.

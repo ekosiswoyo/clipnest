@@ -99,6 +99,28 @@ extension AppDelegate {
             try? await Task.sleep(nanoseconds: 550_000_000)
             check(!open && !panel.isVisible && model.copiedID == nil, "copy feedback closes and resets")
         }
+        if var fixture = model.entries.first {
+            fixture.text = String(repeating: "Full preview café 🪺\n", count: 100)
+            fixture.label = "Text"
+            model.previewAction?(fixture)
+            await settle()
+            func textView(in view: NSView) -> NSTextView? {
+                if let editor = view as? NSTextView { return editor }
+                return view.subviews.lazy.compactMap { textView(in: $0) }.first
+            }
+            let editor = previewWindow?.contentView.flatMap { textView(in: $0) }
+            check(previewWindow?.isVisible == true && editor?.string == fixture.text && editor?.isEditable == false, "preview shows complete selectable text beyond card truncation")
+            hover(point: away, now: start.addingTimeInterval(20))
+            hover(point: away, now: start.addingTimeInterval(22))
+            check(open && previewWindow?.isVisible == true, "preview stays open outside hover trigger")
+            closePreview()
+            await settle()
+            check(previewWindow?.isVisible == false && panel.isKeyWindow, "closing preview returns keyboard focus to history")
+            let plain = try? ClipboardCodec.item(entry: fixture, store: model.store, formatted: fixture.text)
+            check(plain?.string(forType: .string) == fixture.text && plain?.data(forType: .rtf) == nil && plain?.data(forType: .html) == nil, "plain text payload preserves exact Unicode without rich text")
+            hide()
+            await settle()
+        }
         let originalEntries = model.entries
         if var image = originalEntries.first {
             image.pinned = true
@@ -215,6 +237,24 @@ extension AppDelegate {
         try? await Task.sleep(nanoseconds: 300_000_000)
         capturePanel("copy-feedback.png")
         model.copiedID = nil
+        if let entry = snapshot.first {
+            preview(entry)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let view = previewWindow?.contentView { capture(view, name: "preview-image.png") }
+            closePreview()
+            var fixture = entry
+            fixture.text = String(repeating: "Full text preview: café 🪺\n", count: 100)
+            fixture.label = "Text"
+            preview(fixture)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let view = previewWindow?.contentView { capture(view, name: "preview-text.png") }
+            fixture.text = "{\"message\":\"Full JSON preview\",\"items\":[1,2,3]}"
+            fixture.label = "JSON"
+            preview(fixture)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let view = previewWindow?.contentView { capture(view, name: "preview-json.png") }
+            closePreview()
+        }
         settings()
         try? await Task.sleep(nanoseconds: 500_000_000)
         if let view = settingsWindow?.contentView { capture(view, name: "settings.png") }

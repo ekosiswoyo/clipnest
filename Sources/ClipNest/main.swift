@@ -58,6 +58,8 @@ enum HistoryFilter: String, CaseIterable {
     var busy = false
     var copyAction: ((Entry, String?) -> Void)?
     var pasteAction: ((Entry) -> Void)?
+    var plainTextPasteAction: ((Entry) -> Void)?
+    var previewAction: ((Entry) -> Void)?
     @Published var pasteDestination = "previous app"
     @Published var dragging = false
     var dragEnded: ((Bool) -> Void)?
@@ -211,6 +213,8 @@ struct HistoryView: View {
                             ClipboardCard(entry: entry, model: model).id(entry.id)
                                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)))
                             .contextMenu {
+                                Button("Preview…") { model.previewAction?(entry) }
+                                if entry.text != nil { Button("Paste as Plain Text") { model.plainTextPasteAction?(entry) } }
                                 Button("Copy") { model.copyAction?(entry, nil) }
                                 Button(entry.pinned ? "Unpin" : "Pin") { model.mutate { $0.pin(entry.id) } }
                                 if let formatted = entry.text.flatMap(JSONFormatter.format) {
@@ -241,6 +245,19 @@ struct HistoryView: View {
                     }.disabled(model.activeEntry == nil || model.copyInFlight || model.dragging)
                         .help("Paste to \(model.pasteDestination)")
                     Button {
+                        if let entry = model.activeEntry { model.previewAction?(entry) }
+                    } label: { Image(systemName: "eye").frame(width: 28, height: 28) }
+                        .help("Preview selected item · Space").accessibilityLabel("Preview selected item")
+                        .disabled(model.activeEntry == nil || model.copyInFlight || model.dragging)
+                    Menu {
+                        Button("Paste as Plain Text · ⌥Return") {
+                            if let entry = model.activeEntry { model.plainTextPasteAction?(entry) }
+                        }.disabled(model.activeEntry?.text == nil)
+                    } label: { Image(systemName: "chevron.down").frame(width: 20, height: 28) }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .help("Paste options").accessibilityLabel("Paste options")
+                        .disabled(model.activeEntry == nil || model.copyInFlight || model.dragging)
+                    Button {
                         if let entry = model.activeEntry { model.copyAction?(entry, nil) }
                     } label: { Image(systemName: "doc.on.doc").frame(width: 28, height: 28) }
                         .help("Copy selected item · ⌘Return").accessibilityLabel("Copy selected item")
@@ -261,7 +278,7 @@ struct HistoryView: View {
         .animation(reduceMotion ? .easeOut(duration: 0.15) : (model.panelExpanded ? .spring(response: 0.40, dampingFraction: 0.86) : .easeInOut(duration: 0.22)), value: model.panelExpanded)
     }
 }
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = Model()
     var panel: KeyPanel!
     var item: NSStatusItem!
@@ -279,6 +296,7 @@ struct HistoryView: View {
     var handler: EventHandlerRef?
     var keyMonitor: Any?
     var settingsWindow: NSWindow?
+    var previewWindow: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         panel = KeyPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -298,6 +316,8 @@ struct HistoryView: View {
         model.onStatus?(model.status)
         menu()
         model.copyAction = { [weak self] entry, text in self?.copy(entry, text) }
+        model.previewAction = { [weak self] entry in self?.preview(entry) }
+        model.plainTextPasteAction = { [weak self] entry in self?.copy(entry, nil, paste: true, plainText: true) }
         model.pasteAction = { [weak self] entry in self?.copy(entry, nil, paste: entry.text != nil) }
         model.dragEnded = { [weak self] success in
             guard let self else { return }
@@ -327,9 +347,22 @@ struct HistoryView: View {
         timers.append(Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.model.poll() } })
         timers.append(Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.hover() } })
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.panel.isKeyWindow else { return event }
+            guard let self else { return event }
+            if self.previewWindow?.isKeyWindow == true {
+                if event.keyCode == 53 { self.closePreview(); return nil }
+                return event
+            }
+            guard self.panel.isKeyWindow else { return event }
             if event.keyCode == 53 { self.hide(); return nil }
             if let editor = self.panel.firstResponder as? NSTextView, editor.hasMarkedText() { return event }
+            if event.keyCode == 49, !(self.panel.firstResponder is NSTextView),
+               event.modifierFlags.intersection([.command, .control, .option]).isEmpty, let entry = self.model.activeEntry {
+                self.preview(entry); return nil
+            }
+            if event.keyCode == 36, event.modifierFlags.contains(.option), !event.modifierFlags.contains(.command), let entry = self.model.activeEntry {
+                if entry.text != nil { self.copy(entry, nil, paste: true, plainText: true) }
+                return nil
+            }
             if event.keyCode == 125 { self.model.move(1); return nil }
             if event.keyCode == 126 { self.model.move(-1); return nil }
             if event.keyCode == 36, let entry = self.model.filtered.first(where: { $0.id == self.model.selected }) ?? self.model.filtered.first { self.copy(entry, nil, paste: entry.text != nil && !event.modifierFlags.contains(.command)); return nil }
@@ -358,6 +391,7 @@ struct HistoryView: View {
     @objc func sleep() { hide() }
     func hover(point suppliedPoint: NSPoint? = nil, now: Date = Date()) {
         if CommandLine.arguments.contains("--panel-check") { return }
+        if previewWindow?.isVisible == true { return }
         if NSApp.modalWindow != nil || model.copyInFlight || model.copiedID != nil || model.dragging { return }
         let point = suppliedPoint ?? NSEvent.mouseLocation
         let inside = trigger.contains(point) || (open && panel.frame.contains(point))
@@ -401,6 +435,7 @@ struct HistoryView: View {
         panel.wantsFocus = true; NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
     }
     func hide() {
+        previewWindow?.orderOut(nil)
         feedbackID += 1; model.copiedID = nil
         guard open else { return }
         transitionID += 1
@@ -416,12 +451,37 @@ struct HistoryView: View {
             self.panel.contentView = nil
         }
     }
-    func copy(_ entry: Entry, _ formatted: String?, paste: Bool = false) {
+    func preview(_ entry: Entry) {
         guard !model.copyInFlight, !model.dragging else { return }
+        if !open { show(focus: true) } else { takeFocus() }
+        keyboardLatch = true
+        let window = previewWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "ClipNest Preview"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.level = .statusBar
+        window.minSize = NSSize(width: 600, height: 460)
+        window.contentView = NSHostingView(rootView: PreviewView(entry: entry, model: model, close: { [weak self] in self?.closePreview() }))
+        if previewWindow == nil { window.center() }
+        previewWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+    func closePreview() {
+        previewWindow?.orderOut(nil)
+        if open { takeFocus(); keyboardLatch = true }
+    }
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window === previewWindow {
+            if open { takeFocus(); keyboardLatch = true }
+        }
+    }
+    func copy(_ entry: Entry, _ formatted: String?, paste: Bool = false, plainText: Bool = false) {
+        guard !model.copyInFlight, !model.dragging else { return }
+        guard !plainText || entry.text != nil else { return }
         let front = NSWorkspace.shared.frontmostApplication
         let target = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? previousApp : front
         if paste {
-            model.pasteStatus = "Preparing paste to \(target?.localizedName ?? "previous app")…"
+            model.pasteStatus = "Preparing \(plainText ? "plain text paste" : "paste") to \(target?.localizedName ?? "previous app")…"
             guard let target, !target.isTerminated, target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
                 model.pasteStatus = "Paste failed — focus a text field in another app, then reopen history"
                 return
@@ -440,7 +500,7 @@ struct HistoryView: View {
         let presentation = transitionID
         model.io.async { [self] in
             do {
-                let object = try ClipboardCodec.item(entry: entry, store: self.model.store, formatted: formatted)
+                let object = try ClipboardCodec.item(entry: entry, store: self.model.store, formatted: plainText ? entry.text : formatted)
                 Task { @MainActor in
                     let pb = NSPasteboard.general
                     if !paste { self.model.copyInFlight = false }
@@ -453,6 +513,7 @@ struct HistoryView: View {
                                 self.model.pasteStatus = "Copied — paste cancelled because history closed"
                                 return
                             }
+                            self.previewWindow?.orderOut(nil)
                             self.hide()
                             self.panel.orderOut(nil)
                             target.activate(options: [.activateIgnoringOtherApps])
@@ -479,7 +540,7 @@ struct HistoryView: View {
                                         }
                                         down.flags = .maskCommand; up.flags = .maskCommand
                                         down.postToPid(target.processIdentifier); up.postToPid(target.processIdentifier)
-                                        self.model.pasteStatus = "Paste shortcut sent to \(target.localizedName ?? "destination app")"
+                                        self.model.pasteStatus = "\(plainText ? "Plain text paste" : "Paste") shortcut sent to \(target.localizedName ?? "destination app")"
                                         return
                                     }
                                     if let active = NSWorkspace.shared.frontmostApplication,

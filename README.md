@@ -21,13 +21,13 @@ Built with Swift, SwiftUI, and AppKit. No external dependencies, backend, teleme
 
 Get the app from [GitHub Releases](https://github.com/ekosiswoyo/clipnest/releases).
 
-The v0.2.0 binary is for **Apple Silicon (arm64)** and targets **macOS 13 or later**. Extract the ZIP and move `ClipNest.app` to Applications. This development release is ad-hoc signed and is not notarized; macOS may require approving it in Privacy & Security before the first launch. Intel binaries are not included.
+The v0.3.0 binary is for **Apple Silicon (arm64)** and targets **macOS 13 or later**. Extract the ZIP and move `ClipNest.app` to Applications. This development release is ad-hoc signed and is not notarized; macOS may require approving it in Privacy & Security before the first launch. Intel binaries are not included.
 
 ## Usage
 
 Copy text or an image in another app, then hover at the center of the screen’s top edge. Click a text card to paste it at the cursor in the previously active app. On the first attempt, macOS asks for Accessibility access; enable ClipNest in System Settings → Privacy & Security → Accessibility, then click the card again. Focus your destination text field before opening history. Image cards and explicit Copy actions copy to the clipboard for manual **Command + V**.
 
-The default global shortcut is **Control + Option + Space**. It opens the panel with keyboard focus; hover opening does not take focus. Use Up/Down to select, Return to paste text (copy images), Command + Return to copy, and Escape to close. Click the search field to search. Copy, Pin, and Delete appear on hover or selection, and right-click offers additional actions.
+The default global shortcut is **Control + Option + Space**. It opens the panel with keyboard focus; hover opening does not take focus. Use Up/Down to select, Return to paste text (copy images), Command + Return to copy, and Escape to close. Click the search field to search. Press Space outside the search field, click the eye button, or choose Preview from an item’s menu to see full text or an original image. Preview supports selectable text, a JSON formatting toggle, and image zoom. Choose Paste as Plain Text from the item menu or footer paste options, or press Option + Return; it pastes the original text without RTF/HTML formatting. Text history already stores plain text. Copy, Pin, and Delete appear on hover or selection, and right-click offers additional actions.
 
 The menu bar provides history, pause/resume, Settings, cleanup, and Quit. Warning states appear in its icon and tooltip.
 
@@ -75,7 +75,7 @@ Create a release ZIP and checksum:
 ./scripts/package-release.sh
 ```
 
-The ZIP architecture follows the build machine. The published v0.2.0 build was produced on arm64.
+The ZIP architecture follows the build machine. The published v0.3.0 build was produced on arm64.
 
 ## Verification
 

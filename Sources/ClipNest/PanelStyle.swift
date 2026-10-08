@@ -206,6 +206,10 @@ struct ClipboardCard: View {
                 HStack(spacing: 0) {
                     DragHandle(entry: entry, model: model).frame(width: 28, height: 24)
                     Menu {
+                        Button("Preview…") { model.previewAction?(entry) }
+                        if entry.text != nil {
+                            Button("Paste as Plain Text") { model.plainTextPasteAction?(entry) }
+                        }
                         if let formatted = formattedJSON {
                             Button("Copy formatted JSON") { model.copyAction?(entry, formatted) }
                         }
